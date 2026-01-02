@@ -154,50 +154,42 @@ jobs:
     if: github.ref == 'refs/heads/main'
 
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      # 🔍 DEBUG – SHOW FILE STRUCTURE
-      - name: DEBUG – Workspace
-        run: |
-          pwd
-          ls -la
-          find . -maxdepth 5 -type f
+    # 🔍 DEBUG FIRST (ALWAYS RUNS)
+    - name: DEBUG – Workspace
+      run: |
+        echo "PWD:"
+        pwd
+        echo "======================"
+        echo "ROOT FILES:"
+        ls -la
+        echo "======================"
+        echo "FIND ALL YAML FILES:"
+        find . -type f -name "*.yaml"
 
-      # 🔍 DEBUG – FAIL FAST IF FILES MISSING
-      - name: DEBUG – Validate k8s files
-        run: |
-          test -f k8s/mysql.yaml || (echo "❌ k8s/mysql.yaml missing" && exit 1)
-          test -f k8s/ghost-config.yaml || (echo "❌ k8s/ghost-config.yaml missing" && exit 1)
-          test -f k8s/ghost-blue.yaml || (echo "❌ k8s/ghost-blue.yaml missing" && exit 1)
-          test -f k8s/ghost-service.yaml || (echo "❌ k8s/ghost-service.yaml missing" && exit 1)
+    # 🔐 AWS OIDC
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::481665112009:role/GitHubActions-EKS-Role
+        aws-region: us-east-1
 
-      # 🔐 AWS OIDC
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::481665112009:role/GitHubActions-EKS-Role
-          aws-region: us-east-1
+    - name: Update kubeconfig
+      run: aws eks update-kubeconfig --name ghost-cluster --region us-east-1
 
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name ghost-cluster --region us-east-1
+    - name: Verify cluster access
+      run: kubectl get nodes
 
-      - name: Verify cluster
-        run: kubectl get nodes
+    # ❌ TEMPORARILY COMMENT THESE (IMPORTANT)
+    # - name: Deploy MySQL
+    #   run: kubectl apply -f k8s/mysql.yaml
 
-      # 🚀 DEPLOYMENTS
-      - name: Deploy MySQL
-        run: kubectl apply -f k8s/mysql.yaml
+    # - name: Deploy Ghost Config
+    #   run: kubectl apply -f k8s/ghost-config.yaml
 
-      - name: Deploy Ghost Config
-        run: kubectl apply -f k8s/ghost-config.yaml
+    # - name: Deploy Ghost Blue
+    #   run: kubectl apply -f k8s/ghost-blue.yaml
 
-      - name: Deploy Ghost Blue
-        run: kubectl apply -f k8s/ghost-blue.yaml
-
-      - name: Deploy Ghost Service
-        run: kubectl apply -f k8s/ghost-service.yaml
-
-      - name: Verify Pods & Service
-        run: |
-          kubectl get pods -n ghost
-          kubectl get svc -n ghost
+    # - name: Deploy Ghost Service
+    #   run: kubectl apply -f k8s/ghost-service.yaml
