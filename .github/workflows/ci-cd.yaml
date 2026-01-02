@@ -16,6 +16,11 @@ env:
   SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
+# REQUIRED FOR AWS OIDC (SAFE FOR EXISTING JOBS)
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   prepare:
     name: Prepare metadata
@@ -156,3 +161,53 @@ jobs:
           docker compose -f docker-compose.production.yml up -d
           docker image prune -f
           EOS
+
+  # 🔵 NEW JOB – EKS BLUE DEPLOYMENT (SAFE ADDITION)
+  deploy_eks_blue:
+    name: Deploy to EKS (Blue)
+    needs: build_push
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::481665112009:role/GitHubActions-EKS-Role
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ghost-cluster \
+            --region us-east-1
+
+      - name: Verify EKS access
+        run: |
+          kubectl get nodes
+          kubectl get ns
+
+      - name: Deploy MySQL (EKS)
+        run: kubectl apply -f k8s/mysql.yaml
+
+      - name: Deploy Ghost ConfigMap
+        run: kubectl apply -f k8s/ghost-config.yaml
+
+      - name: Deploy Ghost Blue
+        run: kubectl apply -f k8s/ghost-blue.yaml
+
+      - name: Deploy Ghost Service
+        run: kubectl apply -f k8s/ghost-service.yaml
+
+      - name: Verify Pods & Service
+        run: |
+          kubectl get pods -n ghost
+          kubectl get svc ghost-service -n ghost
