@@ -16,198 +16,179 @@ env:
   SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-# REQUIRED FOR AWS OIDC (SAFE FOR EXISTING JOBS)
+# REQUIRED FOR AWS OIDC
 permissions:
   id-token: write
   contents: read
 
+############################
+# 1️⃣ PREPARE METADATA
+############################
 jobs:
   prepare:
     name: Prepare metadata
     runs-on: [self-hosted, devops-runner]
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
-      short_sha: ${{ steps.meta.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v4
       - id: meta
         run: |
           SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
           echo "image_tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
 
+############################
+# 2️⃣ SONARQUBE
+############################
   sonarqube:
     name: SonarQube Analysis
     needs: prepare
     runs-on: [self-hosted, devops-runner]
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
       - name: SonarQube Scan
         uses: sonarsource/sonarqube-scan-action@v2
         with:
           args: >
             -Dsonar.projectKey=ghost-app
             -Dsonar.sources=ghost,apps
-            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/coverage/**
-            -Dsonar.scanner.skipUnchanged=true
-            -Dsonar.scanner.skipUnchangedFiles=true
+            -Dsonar.exclusions=**/node_modules/**
             -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
             -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
+############################
+# 3️⃣ BUILD & PUSH IMAGE
+############################
   build_push:
     name: Build & Push Image
-    needs: [prepare, sonarqube]
+    needs: sonarqube
     runs-on: [self-hosted, devops-runner]
     env:
       IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      - name: Set REPO_URI
-        run: echo "REPO_URI=${{ steps.login-ecr.outputs.registry }}/${ECR_REPO}" >> $GITHUB_ENV
-      - name: Sanity check
-        run: |
-          echo "IMAGE_TAG=${IMAGE_TAG}"
-          test -n "${IMAGE_TAG}" || { echo "IMAGE_TAG is empty"; exit 1; }
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Carry forward :previous
-        run: |
-          docker pull "${REPO_URI}:latest" || true
-          docker tag  "${REPO_URI}:latest" "${REPO_URI}:previous" || true
-          docker push "${REPO_URI}:previous" || true
-      - name: Build and Push with Cache
-        run: |
-          docker buildx create --name ci-builder --use --driver docker-container || true
-          docker buildx inspect --bootstrap
-          docker buildx build \
-            --file .docker/Dockerfile \
-            --cache-from=type=registry,ref=${REPO_URI}:buildcache \
-            --cache-to=type=registry,ref=${REPO_URI}:buildcache,mode=max \
-            -t ${REPO_URI}:latest \
-            -t ${REPO_URI}:${IMAGE_TAG} \
-            --push \
-            .
 
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push
+        run: |
+          docker buildx build \
+            -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ghost-app:${IMAGE_TAG} \
+            -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ghost-app:latest \
+            --push .
+
+############################
+# 4️⃣ DEPLOY TO STAGING (DOCKER)
+############################
   deploy_staging:
     name: Deploy to Staging
     needs: build_push
     runs-on: [self-hosted, devops-runner]
     steps:
       - uses: actions/checkout@v4
-      - name: SSH into staging & deploy
+      - name: SSH & Deploy (Staging)
         env:
           STAGING_HOST: ${{ secrets.STAGING_HOST }}
           STAGING_SSH_USER: ${{ secrets.STAGING_SSH_USER }}
           STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
         run: |
-          echo "${STAGING_SSH_KEY}" | tr -d '\r' > key_staging.pem
-          chmod 600 key_staging.pem
-          scp -i key_staging.pem -o StrictHostKeyChecking=no deploy/docker-compose.staging.yml ${STAGING_SSH_USER}@${STAGING_HOST}:~/ghost/docker-compose.staging.yml
-          ssh -o StrictHostKeyChecking=no -i key_staging.pem ${STAGING_SSH_USER}@${STAGING_HOST} <<'EOS'
-          set -euo pipefail
-          REGION="us-east-1"
-          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-          aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-          cd ~/ghost
-          docker compose -f docker-compose.staging.yml pull
-          docker compose -f docker-compose.staging.yml up -d
-          docker image prune -f
-          EOS
+          echo "${STAGING_SSH_KEY}" > key.pem
+          chmod 600 key.pem
+          scp -i key.pem deploy/docker-compose.staging.yml ${STAGING_SSH_USER}@${STAGING_HOST}:~/ghost/docker-compose.yml
+          ssh -i key.pem ${STAGING_SSH_USER}@${STAGING_HOST} <<'EOF'
+            cd ~/ghost
+            docker compose pull
+            docker compose up -d
+          EOF
 
+############################
+# 5️⃣ SMOKE TEST STAGING
+############################
   smoke_test_staging:
     name: Smoke Test Staging
     needs: deploy_staging
-    runs-on: [self-hosted, devops-runner]
+    runs-on: ubuntu-latest
     steps:
-      - name: Check staging URL
-        run: |
+      - run: |
           for i in {1..30}; do
             code=$(curl -s -o /dev/null -w "%{http_code}" "${{ secrets.STAGING_HEALTH_URL }}" || true)
             echo "Attempt $i => HTTP $code"
-            if [ "$code" = "200" ]; then exit 0; fi
+            [ "$code" = "200" ] && exit 0
             sleep 2
           done
           exit 1
 
+############################
+# 6️⃣ DEPLOY TO PRODUCTION (DOCKER)
+############################
   deploy_production:
     name: Deploy to Production
     needs: smoke_test_staging
     runs-on: [self-hosted, devops-runner]
-    environment:
-      name: production
+    environment: production
     steps:
       - uses: actions/checkout@v4
-      - name: SSH into production & deploy
+      - name: SSH & Deploy (Prod)
         env:
           PROD_HOST: ${{ secrets.PROD_HOST }}
           PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
           PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
         run: |
-          echo "${PROD_SSH_KEY}" | tr -d '\r' > key_prod.pem
-          chmod 600 key_prod.pem
-          scp -i key_prod.pem -o StrictHostKeyChecking=no deploy/docker-compose.production.yml ${PROD_SSH_USER}@${PROD_HOST}:~/ghost/docker-compose.production.yml
-          ssh -o StrictHostKeyChecking=no -i key_prod.pem ${PROD_SSH_USER}@${PROD_HOST} <<'EOS'
-          set -euo pipefail
-          REGION="us-east-1"
-          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-          aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-          cd ~/ghost
-          docker compose -f docker-compose.production.yml pull
-          docker compose -f docker-compose.production.yml up -d
-          docker image prune -f
-          EOS
+          echo "${PROD_SSH_KEY}" > key.pem
+          chmod 600 key.pem
+          scp -i key.pem deploy/docker-compose.production.yml ${PROD_SSH_USER}@${PROD_HOST}:~/ghost/docker-compose.yml
+          ssh -i key.pem ${PROD_SSH_USER}@${PROD_HOST} <<'EOF'
+            cd ~/ghost
+            docker compose pull
+            docker compose up -d
+          EOF
 
-  # 🔵 NEW JOB – EKS BLUE DEPLOYMENT (SAFE ADDITION)
+############################
+# 7️⃣ DEPLOY TO EKS (BLUE)
+############################
   deploy_eks_blue:
     name: Deploy to EKS (Blue)
     needs: build_push
     runs-on: ubuntu-latest
-
-    permissions:
-      id-token: write
-      contents: read
-
     if: github.ref == 'refs/heads/main'
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Debug workspace
+      - uses: actions/checkout@v4
+
+      # 🔍 DEBUG – SHOW FILE STRUCTURE
+      - name: DEBUG – Workspace
         run: |
-          echo "PWD:"
           pwd
-          echo "Repo root files:"
           ls -la
-          echo "Find yaml files:"
-          find . -maxdepth 4 -type f
+          find . -maxdepth 5 -type f
 
+      # 🔍 DEBUG – FAIL FAST IF FILES MISSING
+      - name: DEBUG – Validate k8s files
+        run: |
+          test -f k8s/mysql.yaml || (echo "❌ k8s/mysql.yaml missing" && exit 1)
+          test -f k8s/ghost-config.yaml || (echo "❌ k8s/ghost-config.yaml missing" && exit 1)
+          test -f k8s/ghost-blue.yaml || (echo "❌ k8s/ghost-blue.yaml missing" && exit 1)
+          test -f k8s/ghost-service.yaml || (echo "❌ k8s/ghost-service.yaml missing" && exit 1)
 
-      - name: Configure AWS credentials (OIDC)
+      # 🔐 AWS OIDC
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::481665112009:role/GitHubActions-EKS-Role
           aws-region: us-east-1
 
       - name: Update kubeconfig
-        run: |
-          aws eks update-kubeconfig \
-            --name ghost-cluster \
-            --region us-east-1
+        run: aws eks update-kubeconfig --name ghost-cluster --region us-east-1
 
-      - name: Verify EKS access
-        run: |
-          kubectl get nodes
-          kubectl get ns
+      - name: Verify cluster
+        run: kubectl get nodes
 
-      - name: Deploy MySQL (EKS)
+      # 🚀 DEPLOYMENTS
+      - name: Deploy MySQL
         run: kubectl apply -f k8s/mysql.yaml
 
-      - name: Deploy Ghost ConfigMap
+      - name: Deploy Ghost Config
         run: kubectl apply -f k8s/ghost-config.yaml
 
       - name: Deploy Ghost Blue
@@ -219,4 +200,4 @@ jobs:
       - name: Verify Pods & Service
         run: |
           kubectl get pods -n ghost
-          kubectl get svc ghost-service -n ghost
+          kubectl get svc -n ghost
