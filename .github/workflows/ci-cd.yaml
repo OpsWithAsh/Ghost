@@ -177,6 +177,15 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      - name: Debug workspace
+        run: |
+          echo "PWD:"
+          pwd
+          echo "Repo root files:"
+          ls -la
+          echo "Find yaml files:"
+          find . -maxdepth 4 -type f
+
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
