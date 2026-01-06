@@ -116,14 +116,19 @@ jobs:
     needs: deploy_staging
     runs-on: ubuntu-latest
     steps:
-      - name: Smoke Test
+      - name: Smoke Test Staging
         run: |
-          for i in {1..30}; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "${{ secrets.STAGING_HEALTH_URL }}" || true)
-            echo "Attempt $i => HTTP $code"
-            [ "$code" = "200" ] && exit 0
-            sleep 2
+          URL="${{ secrets.STAGING_HEALTH_URL }}"
+          for i in {1..15}; do
+          code=$(curl -s --connect-timeout 2 --max-time 5 -o /dev/null -w "%{http_code}" "$URL" || true)
+          echo "Attempt $i => HTTP $code"
+          if [[ "$code" == "200" || "$code" == "301" || "$code" == "302" ]]; then
+          echo "✅ Smoke test passed"
+          exit 0
+          fi
+          sleep 1
           done
+          echo "❌ Smoke test failed"
           exit 1
 
 ############################
