@@ -61,25 +61,31 @@ jobs:
 ############################
   build_push:
     name: Build & Push Image
-    needs: sonarqube
-    runs-on: [self-hosted, devops-runner]
-    env:
-      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+    runs-on: self-hosted
+
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
+    - name: Set IMAGE_TAG
+      run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
-      - name: Build & Push Image
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          IMAGE=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
+    - name: Debug IMAGE_TAG
+      run: |
+        echo "IMAGE_TAG=$IMAGE_TAG"
+        env | grep IMAGE
 
-          docker buildx build \
-            -t ${IMAGE}:${IMAGE_TAG} \
-            -t ${IMAGE}:latest \
-            --push .
+    - name: Login to ECR
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build & Push Docker Image
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        IMAGE=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
+
+        docker buildx build \
+          -t ${IMAGE}:${IMAGE_TAG} \
+          -t ${IMAGE}:latest \
+          --push .
 
 ############################
 # 4️⃣ DEPLOY TO STAGING (DOCKER)
