@@ -71,11 +71,14 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build & Push
+      - name: Build & Push Image
         run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
+
           docker buildx build \
-            -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ghost-app:${IMAGE_TAG} \
-            -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ghost-app:latest \
+            -t ${IMAGE}:${IMAGE_TAG} \
+            -t ${IMAGE}:latest \
             --push .
 
 ############################
