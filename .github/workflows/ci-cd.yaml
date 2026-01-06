@@ -138,37 +138,29 @@ jobs:
     name: Deploy to Production
     needs: smoke_test_staging
     runs-on: [self-hosted, devops-runner]
-    environment: production
+    environment:
+      name: production
     steps:
       - uses: actions/checkout@v4
-      - name: SSH & Deploy (Prod)
+      - name: SSH into production & deploy
         env:
           PROD_HOST: ${{ secrets.PROD_HOST }}
           PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
           PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
         run: |
-          set -e
-      
-          echo "${PROD_SSH_KEY}" | tr -d '\r' > key.pem
-          chmod 600 key.pem
-      
-          scp \
-            -i key.pem \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            deploy/docker-compose.production.yml \
-            ${PROD_SSH_USER}@${PROD_HOST}:~/ghost/docker-compose.yml
-      
-          ssh \
-            -i key.pem \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            ${PROD_SSH_USER}@${PROD_HOST} <<'EOF'
-              set -e
-              cd ~/ghost
-              docker compose pull
-              docker compose up -d
-            EOF
+          echo "${PROD_SSH_KEY}" | tr -d '\r' > key_prod.pem
+          chmod 600 key_prod.pem
+          scp -i key_prod.pem -o StrictHostKeyChecking=no deploy/docker-compose.production.yml ${PROD_SSH_USER}@${PROD_HOST}:~/ghost/docker-compose.production.yml
+          ssh -o StrictHostKeyChecking=no -i key_prod.pem ${PROD_SSH_USER}@${PROD_HOST} <<'EOS'
+          set -euo pipefail
+          REGION="us-east-1"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+          cd ~/ghost
+          docker compose -f docker-compose.production.yml pull
+          docker compose -f docker-compose.production.yml up -d
+          docker image prune -f
+          EOS
 
 
 ############################
