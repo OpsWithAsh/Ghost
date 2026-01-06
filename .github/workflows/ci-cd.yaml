@@ -2,7 +2,7 @@ name: CI-CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 concurrency:
@@ -16,15 +16,14 @@ env:
   SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-# REQUIRED FOR AWS OIDC
 permissions:
   id-token: write
   contents: read
 
+jobs:
 ############################
 # 1️⃣ PREPARE METADATA
 ############################
-jobs:
   prepare:
     name: Prepare metadata
     runs-on: [self-hosted, devops-runner]
@@ -57,38 +56,36 @@ jobs:
             -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
 ############################
-# 3️⃣ BUILD & PUSH IMAGE
+# 3️⃣ BUILD & PUSH IMAGE (ECR)
 ############################
   build_push:
-    name: Build & Push Image
-    runs-on: self-hosted
-
+    name: Build & Push Image (ECR)
+    needs: prepare
+    runs-on: [self-hosted, devops-runner]
+    env:
+      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set IMAGE_TAG
-      run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Debug IMAGE_TAG
-      run: |
-        echo "IMAGE_TAG=$IMAGE_TAG"
-        env | grep IMAGE
+      - name: Build & Push Image
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
 
-    - name: Login to ECR
-      uses: aws-actions/amazon-ecr-login@v2
+          echo "Building image: $IMAGE"
+          echo "Using tag: ${IMAGE_TAG}"
 
-    - name: Build & Push Docker Image
-      run: |
-        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-        IMAGE=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
-
-        docker buildx build \
-          -t ${IMAGE}:${IMAGE_TAG} \
-          -t ${IMAGE}:latest \
-          --push .
+          docker buildx build \
+            --file .docker/Dockerfile \
+            -t ${IMAGE}:${IMAGE_TAG} \
+            -t ${IMAGE}:latest \
+            --push .
 
 ############################
-# 4️⃣ DEPLOY TO STAGING (DOCKER)
+# 4️⃣ DEPLOY TO STAGING
 ############################
   deploy_staging:
     name: Deploy to Staging
@@ -119,7 +116,8 @@ jobs:
     needs: deploy_staging
     runs-on: ubuntu-latest
     steps:
-      - run: |
+      - name: Smoke Test
+        run: |
           for i in {1..30}; do
             code=$(curl -s -o /dev/null -w "%{http_code}" "${{ secrets.STAGING_HEALTH_URL }}" || true)
             echo "Attempt $i => HTTP $code"
@@ -129,7 +127,7 @@ jobs:
           exit 1
 
 ############################
-# 6️⃣ DEPLOY TO PRODUCTION (DOCKER)
+# 6️⃣ DEPLOY TO PRODUCTION
 ############################
   deploy_production:
     name: Deploy to Production
@@ -165,22 +163,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 🔍 DEBUG – SHOW FILE STRUCTURE
       - name: DEBUG – Workspace
         run: |
           pwd
           ls -la
           find . -maxdepth 5 -type f
 
-      # 🔍 DEBUG – FAIL FAST IF FILES MISSING
-      - name: DEBUG – Validate k8s files
-        run: |
-          test -f k8s/mysql.yaml || (echo "❌ k8s/mysql.yaml missing" && exit 1)
-          test -f k8s/ghost-config.yaml || (echo "❌ k8s/ghost-config.yaml missing" && exit 1)
-          test -f k8s/ghost-blue.yaml || (echo "❌ k8s/ghost-blue.yaml missing" && exit 1)
-          test -f k8s/ghost-service.yaml || (echo "❌ k8s/ghost-service.yaml missing" && exit 1)
-
-      # 🔐 AWS OIDC
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -193,7 +181,6 @@ jobs:
       - name: Verify cluster
         run: kubectl get nodes
 
-      # 🚀 DEPLOYMENTS
       - name: Deploy MySQL
         run: kubectl apply -f k8s/mysql.yaml
 
