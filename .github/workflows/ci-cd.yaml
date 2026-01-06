@@ -147,24 +147,29 @@ jobs:
           PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
           PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
         run: |
-          echo "${PROD_SSH_KEY}" > key.pem
-          chmod 600 key.pem
-
-          scp -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              -i key.pem \
-              deploy/docker-compose.production.yml \
-              ${PROD_SSH_USER}@${PROD_HOST}:~/ghost/docker-compose.yml
+          set -e
       
-          ssh -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              -i key.pem \
-              ${PROD_SSH_USER}@${PROD_HOST} <<'EOF'
-                set -e
-                cd ~/ghost
-                docker compose pull
-                docker compose up -d
-              EOF
+          echo "${PROD_SSH_KEY}" | tr -d '\r' > key.pem
+          chmod 600 key.pem
+      
+          scp \
+            -i key.pem \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            deploy/docker-compose.production.yml \
+            ${PROD_SSH_USER}@${PROD_HOST}:~/ghost/docker-compose.yml
+      
+          ssh \
+            -i key.pem \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            ${PROD_SSH_USER}@${PROD_HOST} <<'EOF'
+              set -e
+              cd ~/ghost
+              docker compose pull
+              docker compose up -d
+            EOF
+
 
 ############################
 # 7️⃣ DEPLOY TO EKS (BLUE)
